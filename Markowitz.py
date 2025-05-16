@@ -54,17 +54,11 @@ class EqualWeightPortfolio:
         self.exclude = exclude
 
     def calculate_weights(self):
-        # Get the assets by excluding the specified column
         assets = df.columns[df.columns != self.exclude]
         self.portfolio_weights = pd.DataFrame(index=df.index, columns=df.columns)
-
-        """
-        TODO: Complete Task 1 Below
-        """
-
-        """
-        TODO: Complete Task 1 Above
-        """
+        # 等權重分配
+        equal_weight = 1 / len(assets)
+        self.portfolio_weights.loc[:, assets] = equal_weight
         self.portfolio_weights.ffill(inplace=True)
         self.portfolio_weights.fillna(0, inplace=True)
 
@@ -103,21 +97,47 @@ class RiskParityPortfolio:
         self.lookback = lookback
 
     def calculate_weights(self):
-        # Get the assets by excluding the specified column
+        # 獲取要使用的資產（排除指定的資產，在本例中是SPY）
         assets = df.columns[df.columns != self.exclude]
-
-        # Calculate the portfolio weights
+        
+        # 初始化投資組合權重
         self.portfolio_weights = pd.DataFrame(index=df.index, columns=df.columns)
-
-        """
-        TODO: Complete Task 2 Below
-        """
-
-        """
-        TODO: Complete Task 2 Above
-        """
-
+        
+        # 對每個時間點計算風險平價權重
+        for i in range(self.lookback, len(df)):
+            # 獲取當前日期
+            current_date = df.index[i]
+            
+            # 獲取回顧期間的收益率
+            lookback_returns = df_returns.iloc[i-self.lookback:i][assets]
+            
+            # 計算每個資產的波動率（標準差）
+            volatility = lookback_returns.std()
+            
+            # 處理可能的零波動率
+            volatility = volatility.replace(0, np.nan)
+            
+            # 計算每個資產的反向波動率
+            inverse_volatility = 1 / volatility
+            
+            # 處理無限大的值
+            inverse_volatility = inverse_volatility.fillna(0)
+            
+            # 計算反向波動率的總和
+            sum_inverse_volatility = inverse_volatility.sum()
+            
+            # 計算風險平價權重
+            if sum_inverse_volatility == 0:
+                weights = pd.Series(1/len(assets), index=assets)
+            else:
+                weights = inverse_volatility / sum_inverse_volatility
+            
+            # 將計算出的權重賦值給當前日期
+            self.portfolio_weights.loc[current_date, assets] = weights
+        
+        # 使用前向填充來處理開始期間的缺失值
         self.portfolio_weights.ffill(inplace=True)
+        # 將任何剩餘的缺失值填充為0
         self.portfolio_weights.fillna(0, inplace=True)
 
     def calculate_portfolio_returns(self):
@@ -175,46 +195,33 @@ class MeanVariancePortfolio:
         Sigma = R_n.cov().values
         mu = R_n.mean().values
         n = len(R_n.columns)
-
+        
+        # 添加正則項避免奇異矩陣
+        epsilon = 1e-6
+        Sigma += np.eye(n) * epsilon
+        
         with gp.Env(empty=True) as env:
             env.setParam("OutputFlag", 0)
-            env.setParam("DualReductions", 0)
             env.start()
             with gp.Model(env=env, name="portfolio") as model:
-                """
-                TODO: Complete Task 3 Below
-                """
-
-                # Sample Code: Initialize Decision w and the Objective
-                # NOTE: You can modify the following code
-                w = model.addMVar(n, name="w", ub=1)
-                model.setObjective(w.sum(), gp.GRB.MAXIMIZE)
-
-                """
-                TODO: Complete Task 3 Above
-                """
+                w = model.addMVar(n, lb=0, name="w")  # 非負約束
+                # 目標函數：max w^T μ - (γ/2) w^T Σ w
+                objective = mu @ w - (gamma / 2) * (w @ Sigma @ w)
+                model.setObjective(objective, gp.GRB.MAXIMIZE)
+                # 約束：權重和為1
+                model.addConstr(w.sum() == 1, "budget")
                 model.optimize()
-
-                # Check if the status is INF_OR_UNBD (code 4)
-                if model.status == gp.GRB.INF_OR_UNBD:
-                    print(
-                        "Model status is INF_OR_UNBD. Reoptimizing with DualReductions set to 0."
-                    )
-                elif model.status == gp.GRB.INFEASIBLE:
-                    # Handle infeasible model
-                    print("Model is infeasible.")
-                elif model.status == gp.GRB.INF_OR_UNBD:
-                    # Handle infeasible or unbounded model
-                    print("Model is infeasible or unbounded.")
-
-                if model.status == gp.GRB.OPTIMAL or model.status == gp.GRB.SUBOPTIMAL:
-                    # Extract the solution
-                    solution = []
-                    for i in range(n):
-                        var = model.getVarByName(f"w[{i}]")
-                        # print(f"w {i} = {var.X}")
-                        solution.append(var.X)
-
+                
+                if model.status == gp.GRB.OPTIMAL:
+                    solution = [w[i].X for i in range(n)]
+                else:
+                    # 優化失敗時返回最小方差組合
+                    try:
+                        model.setObjective((w @ Sigma @ w), gp.GRB.MINIMIZE)
+                        model.optimize()
+                        solution = [w[i].X for i in range(n)]
+                    except:
+                        solution = [1/n] * n  # 完全失敗時返回等權重
         return solution
 
     def calculate_portfolio_returns(self):
@@ -493,3 +500,5 @@ if __name__ == "__main__":
     if args.report:
         if "mv" in args.report:
             helper.plot_report_metrics()
+
+

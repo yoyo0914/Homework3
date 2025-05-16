@@ -58,22 +58,48 @@ class MyPortfolio:
         self.gamma = gamma
 
     def calculate_weights(self):
-        # Get the assets by excluding the specified column
         assets = self.price.columns[self.price.columns != self.exclude]
-
-        # Calculate the portfolio weights
+        n_assets = len(assets)
+        if n_assets == 0:
+            raise ValueError("No assets available after exclusion.")
+        
         self.portfolio_weights = pd.DataFrame(
             index=self.price.index, columns=self.price.columns
         )
-
-        """
-        TODO: Complete Task 4 Below
-        """
-
-        """
-        TODO: Complete Task 4 Above
-        """
-
+        
+        dates = self.returns.index
+        for i, date in enumerate(dates):
+            if i < self.lookback:
+                if n_assets > 0:
+                    self.portfolio_weights.loc[date, assets] = 1 / n_assets
+                continue
+            
+            historical_returns = self.returns[assets].iloc[i - self.lookback : i].dropna()
+            if historical_returns.empty:
+                continue
+            
+            mu = historical_returns.mean().values
+            cov = historical_returns.cov().values + 1e-5 * np.eye(n_assets)  # 正则化
+            
+            model = gp.Model()
+            w = model.addVars(n_assets, lb=0.0, name="w")
+            model.addConstr(gp.quicksum(w[j] for j in range(n_assets)) == 1, "budget")
+            
+            obj = gp.quicksum(mu[j] * w[j] for j in range(n_assets)) - \
+                self.gamma * gp.quicksum(cov[j, k] * w[j] * w[k] for j in range(n_assets) for k in range(n_assets))
+            model.setObjective(obj, gp.GRB.MAXIMIZE)
+            
+            model.setParam('OutputFlag', 0)
+            model.optimize()
+            
+            if model.status == gp.GRB.OPTIMAL:
+                optimized_weights = [w[j].X for j in range(n_assets)]
+            else:
+                print(f"Optimization failed at {date} (Status: {model.status})")
+                optimized_weights = [1/n_assets] * n_assets
+            
+            self.portfolio_weights.loc[date, assets] = optimized_weights
+        
         self.portfolio_weights.ffill(inplace=True)
         self.portfolio_weights.fillna(0, inplace=True)
 

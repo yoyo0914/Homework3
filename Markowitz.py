@@ -97,47 +97,41 @@ class RiskParityPortfolio:
         self.lookback = lookback
 
     def calculate_weights(self):
-        # 獲取要使用的資產（排除指定的資產，在本例中是SPY）
+        # Get the assets by excluding the specified column
         assets = df.columns[df.columns != self.exclude]
-        
-        # 初始化投資組合權重
+        # Calculate the portfolio weights
         self.portfolio_weights = pd.DataFrame(index=df.index, columns=df.columns)
         
-        # 對每個時間點計算風險平價權重
-        for i in range(self.lookback, len(df)):
-            # 獲取當前日期
-            current_date = df.index[i]
-            
-            # 獲取回顧期間的收益率
-            lookback_returns = df_returns.iloc[i-self.lookback:i][assets]
+        """
+        TODO: Complete Task 2 Below
+        """
+        for i in range(self.lookback + 1, len(df)):
+            # 取得回顧期間的收益率數據
+            R_n = df_returns.copy()[assets].iloc[i - self.lookback : i]
             
             # 計算每個資產的波動率（標準差）
-            volatility = lookback_returns.std()
+            volatility = R_n.std()
             
-            # 處理可能的零波動率
-            volatility = volatility.replace(0, np.nan)
-            
-            # 計算每個資產的反向波動率
+            # 計算反向波動率（1/σ）
             inverse_volatility = 1 / volatility
             
-            # 處理無限大的值
-            inverse_volatility = inverse_volatility.fillna(0)
+            # 處理可能的無限值或 NaN
+            inverse_volatility = inverse_volatility.replace([np.inf, -np.inf], np.nan).fillna(0)
             
-            # 計算反向波動率的總和
-            sum_inverse_volatility = inverse_volatility.sum()
-            
-            # 計算風險平價權重
-            if sum_inverse_volatility == 0:
-                weights = pd.Series(1/len(assets), index=assets)
+            # 如果所有資產的反向波動率都為零，使用均等權重
+            if inverse_volatility.sum() == 0:
+                weights = pd.Series(1.0 / len(assets), index=assets)
             else:
-                weights = inverse_volatility / sum_inverse_volatility
+                # 計算風險平價權重：w_i = (1/σ_i) / Σ(1/σ_j)
+                weights = inverse_volatility / inverse_volatility.sum()
             
-            # 將計算出的權重賦值給當前日期
-            self.portfolio_weights.loc[current_date, assets] = weights
+            # 將計算出的權重賦值給當前日期的投資組合
+            self.portfolio_weights.loc[df.index[i], assets] = weights.values
+        """
+        TODO: Complete Task 2 Above
+        """
         
-        # 使用前向填充來處理開始期間的缺失值
         self.portfolio_weights.ffill(inplace=True)
-        # 將任何剩餘的缺失值填充為0
         self.portfolio_weights.fillna(0, inplace=True)
 
     def calculate_portfolio_returns(self):
@@ -195,34 +189,34 @@ class MeanVariancePortfolio:
         Sigma = R_n.cov().values
         mu = R_n.mean().values
         n = len(R_n.columns)
-        
-        # 添加正則項避免奇異矩陣
-        epsilon = 1e-6
-        Sigma += np.eye(n) * epsilon
-        
+
         with gp.Env(empty=True) as env:
             env.setParam("OutputFlag", 0)
+            env.setParam("DualReductions", 0)
             env.start()
             with gp.Model(env=env, name="portfolio") as model:
-                w = model.addMVar(n, lb=0, name="w")  # 非負約束
-                # 目標函數：max w^T μ - (γ/2) w^T Σ w
-                objective = mu @ w - (gamma / 2) * (w @ Sigma @ w)
-                model.setObjective(objective, gp.GRB.MAXIMIZE)
-                # 約束：權重和為1
-                model.addConstr(w.sum() == 1, "budget")
+                # 初始化決策變量 w
+                w = model.addMVar(n, name="w", lb=0, ub=1)
+                
+                # 設置目標函數：最大化 w^T μ - (γ/2) w^T Σw
+                # 使用 Gurobi 的二次形式表達方式
+                risk_term = gamma/2 * w @ Sigma @ w
+                expected_return = mu @ w
+                model.setObjective(expected_return - risk_term, gp.GRB.MAXIMIZE)
+                
+                # 添加總和為1的約束條件
+                model.addConstr(w.sum() == 1, "budget_constraint")
+                
                 model.optimize()
                 
-                if model.status == gp.GRB.OPTIMAL:
-                    solution = [w[i].X for i in range(n)]
+                # 檢查模型狀態代碼...
+                if model.status == gp.GRB.OPTIMAL or model.status == gp.GRB.SUBOPTIMAL:
+                    # 提取解決方案
+                    solution = w.X.tolist()  # 直接使用向量變數的解
+                    return solution
                 else:
-                    # 優化失敗時返回最小方差組合
-                    try:
-                        model.setObjective((w @ Sigma @ w), gp.GRB.MINIMIZE)
-                        model.optimize()
-                        solution = [w[i].X for i in range(n)]
-                    except:
-                        solution = [1/n] * n  # 完全失敗時返回等權重
-        return solution
+                    # 如果模型不是最優的，返回均等權重
+                    return [1.0/n] * n
 
     def calculate_portfolio_returns(self):
         # Ensure weights are calculated

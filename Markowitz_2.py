@@ -58,48 +58,87 @@ class MyPortfolio:
         self.gamma = gamma
 
     def calculate_weights(self):
+        # Get the assets by excluding the specified column
         assets = self.price.columns[self.price.columns != self.exclude]
-        n_assets = len(assets)
-        if n_assets == 0:
-            raise ValueError("No assets available after exclusion.")
-        
+
+        # Calculate the portfolio weights
         self.portfolio_weights = pd.DataFrame(
             index=self.price.index, columns=self.price.columns
         )
+
+        """
+        TODO: Complete Task 4 Below
+        """
         
-        dates = self.returns.index
-        for i, date in enumerate(dates):
-            if i < self.lookback:
-                if n_assets > 0:
-                    self.portfolio_weights.loc[date, assets] = 1 / n_assets
-                continue
+        # 簡單但有效的動量策略
+        for i in range(self.lookback, len(self.price)):
+            current_date = self.price.index[i]
             
-            historical_returns = self.returns[assets].iloc[i - self.lookback : i].dropna()
-            if historical_returns.empty:
-                continue
+            # 使用更長的lookback period來計算動量
+            lookback_period = min(126, i)  # 6個月或可用的最大天數
+            start_idx = i - lookback_period
             
-            mu = historical_returns.mean().values
-            cov = historical_returns.cov().values + 1e-5 * np.eye(n_assets)  # 正则化
+            # 計算各sector的總回報
+            total_returns = (self.price.iloc[i][assets] / self.price.iloc[start_idx][assets] - 1)
             
-            model = gp.Model()
-            w = model.addVars(n_assets, lb=0.0, name="w")
-            model.addConstr(gp.quicksum(w[j] for j in range(n_assets)) == 1, "budget")
+            # 計算短期動量 (1個月)
+            short_lookback = min(21, i)
+            short_start_idx = i - short_lookback
+            short_returns = (self.price.iloc[i][assets] / self.price.iloc[short_start_idx][assets] - 1)
             
-            obj = gp.quicksum(mu[j] * w[j] for j in range(n_assets)) - \
-                self.gamma * gp.quicksum(cov[j, k] * w[j] * w[k] for j in range(n_assets) for k in range(n_assets))
-            model.setObjective(obj, gp.GRB.MAXIMIZE)
+            # 計算波動率
+            hist_returns = self.returns.iloc[start_idx:i][assets]
+            volatility = hist_returns.std() * np.sqrt(252)
             
-            model.setParam('OutputFlag', 0)
-            model.optimize()
+            # 風險調整後的動量分數
+            risk_adj_returns = total_returns / volatility
+            risk_adj_short = short_returns / volatility
             
-            if model.status == gp.GRB.OPTIMAL:
-                optimized_weights = [w[j].X for j in range(n_assets)]
+            # 綜合分數：長期動量 + 短期動量
+            composite_score = 0.6 * risk_adj_returns + 0.4 * risk_adj_short
+            
+            # 排序所有sector
+            sector_ranks = composite_score.rank(ascending=False)
+            
+            # 集中投資策略：只投資前3名的sector
+            weights = np.zeros(len(assets))
+            
+            # 找出前3名
+            top_3_mask = sector_ranks <= 3
+            top3_sectors = assets[top_3_mask]
+            
+            if len(top3_sectors) >= 3:
+                # 權重分配：第1名 50%, 第2名 30%, 第3名 20%
+                sorted_top3 = composite_score[top3_sectors].sort_values(ascending=False)
+                
+                for j, asset in enumerate(assets):
+                    if asset == sorted_top3.index[0]:  # 第1名
+                        weights[j] = 0.50
+                    elif asset == sorted_top3.index[1]:  # 第2名
+                        weights[j] = 0.30
+                    elif asset == sorted_top3.index[2]:  # 第3名
+                        weights[j] = 0.20
             else:
-                print(f"Optimization failed at {date} (Status: {model.status})")
-                optimized_weights = [1/n_assets] * n_assets
+                # 如果數據不足，平均分配給前3名
+                for j, asset in enumerate(assets):
+                    if top_3_mask[j]:
+                        weights[j] = 1.0 / top_3_mask.sum()
             
-            self.portfolio_weights.loc[date, assets] = optimized_weights
-        
+            # 安全檢查：確保權重和為1
+            if weights.sum() > 0:
+                weights = weights / weights.sum()
+            else:
+                # 極端情況：等權重分配
+                weights = np.ones(len(assets)) / len(assets)
+            
+            # 分配權重到組合
+            for j, asset in enumerate(assets):
+                self.portfolio_weights.loc[current_date, asset] = weights[j]
+
+        """
+        TODO: Complete Task 4 Above
+        """
+
         self.portfolio_weights.ffill(inplace=True)
         self.portfolio_weights.fillna(0, inplace=True)
 
